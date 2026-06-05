@@ -3,263 +3,361 @@ package com.human.site.service
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.microsoft.playwright.Browser
 import com.microsoft.playwright.BrowserType
+import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
-import com.microsoft.playwright.options.Cookie
-import org.springframework.stereotype.Service
-import org.springframework.web.reactive.function.client.WebClient
 import java.io.File
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Paths
+import org.springframework.stereotype.Service
 
 @Service
 class GeneXusPayrollService {
 
     private val objectMapper = jacksonObjectMapper()
     private val originUrl = "https://ahr.humansite.com.mx"
-    private val portalPath = "/miportalmain.aspx"
 
-    // WebClient solo para descarga de PDFs (una vez que tenemos la URL)
-    private val webClient = WebClient.builder()
-        .baseUrl(originUrl)
-        .defaultHeader(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-        )
-        .defaultHeader("Accept-Language", "es-419,es;q=0.9,en;q=0.8")
-        .build()
+    data class EmpleadoInfo(
+        val idUsuario: String,
+        val nie: String,
+        val nombre: String,
+        val plazaId: String,
+        val anio: String = "2026",
+        val mes: String = "5",
+    )
 
-    fun ejecutarDescargaMasiva(sessionCookieValue: String, totalFilas: Int) {
-        val cookieHeader = if (sessionCookieValue.contains("=")) sessionCookieValue
-        else "ASP.NET_SessionId=$sessionCookieValue"
-        val gxTokenInicial = "QCyKkwxFP36mZG64jo29yLgY27CRSYnbxPMpPx/h1Lh0BOmcT5/ssipB9G+AOeGK"
-
-        println("[*] Iniciando proceso automatizado por lotes...")
+    fun ejecutarDescargaMasiva(totalFilas: Int, empleado: EmpleadoInfo, contrasenaUsuario: String) {
+        println("[*] Iniciando proceso automatizado por lotes con Interacción Visual...")
 
         Playwright.create().use { playwright ->
-            val browser: Browser = playwright.chromium().launch(
-                BrowserType.LaunchOptions().setHeadless(true)
-            )
+            val launchOptions =
+                BrowserType.LaunchOptions()
+                    .setHeadless(false)
+                    .setArgs(
+                        listOf("--disable-blink-features=AutomationControlled", "--start-maximized")
+                    )
+
+            val browser: Browser = playwright.chromium().launch(launchOptions)
 
             browser.use { br ->
-                val context = br.newContext()
+                val contextOptions =
+                    Browser.NewContextOptions()
+                        .setUserAgent(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+                        )
+                        .setViewportSize(1366, 768)
 
-                // Establecer cookies de sesión (valores URL-decoded para Playwright)
-                val cookiesList = cookieHeader.split(";").mapNotNull { part ->
-                    val kv = part.trim().split("=", limit = 2)
-                    if (kv.size == 2) {
-                        val name = kv[0].trim()
-                        val value = try {
-                            java.net.URLDecoder.decode(kv[1].trim(), "UTF-8")
-                        } catch (e: Exception) {
-                            kv[1].trim()
-                        }
-                        Cookie(name, value).apply {
-                            domain = "ahr.humansite.com.mx"
-                            path = "/"
-                            secure = true
-                            httpOnly = false
-                            sameSite = com.microsoft.playwright.options.SameSiteAttribute.NONE
-                        }
-                    } else null
+                val context = br.newContext(contextOptions)
+                context.addInitScript(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+
+                // BLINDAJE ANTICIPADO: Desactiva el cuadro de diálogo de impresión de Chrome en las
+                // pestañas secundarias
+                context.onPage { nuevaPagina ->
+                    nuevaPagina.addInitScript(
+                        "() => { window.print = () => { console.log('Ventana de impresión anulada preventivamente.'); }; }"
+                    )
                 }
-                context.addCookies(cookiesList)
-                println("[*] ${cookiesList.size} cookie(s) de sesión establecidas.")
 
                 val page = context.newPage()
+                val loginUrl = "$originUrl/hlogin.aspx"
+                println("[*] Navegando a la pantalla de inicio de sesión: $loginUrl")
 
-                // Navegar al portal con DOMCONTENTLOADED para no esperar scripts infinitos de GeneXus
-                val targetUrl = "$originUrl$portalPath?$gxTokenInicial"
-                println("[*] Navegando al portal: $targetUrl")
                 try {
                     page.navigate(
-                        targetUrl,
-                        com.microsoft.playwright.Page.NavigateOptions()
-                            .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.DOMCONTENTLOADED)
-                            .setTimeout(60000.0)
+                        loginUrl,
+                        Page.NavigateOptions()
+                            .setWaitUntil(com.microsoft.playwright.options.WaitUntilState.LOAD)
+                            .setTimeout(60000.0),
                     )
-                    println("[*] DOM cargado. Esperando inicialización de GeneXus (5s)...")
-                    Thread.sleep(5000)
-                } catch (e: Exception) {
-                    println("[-] Advertencia en navegación: ${e.message?.take(150)}")
-                }
 
-                // Verificar estado de la página
-                val gxStateLength = (page.evaluate("document.getElementById('GXState')?.value?.length || 0") as? Number)?.toInt() ?: 0
-                println("[*] GXState en DOM: $gxStateLength chars")
+                    println("[*] Pantalla de login detectada. Insertando credenciales...")
+                    page.waitForSelector("#vUSUID")
+                    page.locator("#vUSUID").fill(empleado.idUsuario.uppercase())
 
-                if (gxStateLength < 10) {
-                    println("[-] ADVERTENCIA: GXState vacío. Guardando screenshot para diagnóstico...")
-                    try {
-                        page.screenshot(
-                            com.microsoft.playwright.Page.ScreenshotOptions()
-                                .setPath(java.nio.file.Paths.get("screenshot_portal.png"))
-                                .setFullPage(true)
-                        )
-                    } catch (e: Exception) { /* ignorar */ }
-                    page.content().also { File("html_dom_renderizado.html").writeText(it) }
-                    println("[-] Abortando: el portal no respondió correctamente con la sesión actual.")
-                    return@use
-                }
+                    page.waitForSelector("#vUSUPSW")
+                    page.locator("#vUSUPSW").fill(contrasenaUsuario)
 
-                println("[+] Portal cargado exitosamente. Iniciando descarga por lotes...")
+                    println("[*] Enviando formulario mediante pulsación Enter...")
+                    page.locator("#vUSUPSW").press("Enter")
 
-                // Bucle de descarga por fila usando fetch() nativo del navegador
-                for (i in 1..totalFilas) {
-                    val rowIndex = String.format("%04d", i)
-                    println("[*] Procesando fila: $rowIndex")
+                    println(
+                        "[*] Esperando que el portal procese el login y monte los componentes..."
+                    )
+                    page.waitForSelector(
+                        "#W0099vANO_PROCF",
+                        Page.WaitForSelectorOptions().setTimeout(45000.0),
+                    )
+                    println("[+] ¡Autenticación completada y panel de control visible!")
 
-                    try {
-                        // El POST se ejecuta DESDE DENTRO del contexto del navegador con fetch()
-                        // Esto garantiza que todas las cookies, tokens AJAX y headers del SPA se envíen correctamente
-                        val responseBody = page.evaluate("""
-                            async () => {
-                                try {
-                                    // 1. Leer y modificar el GXState para el evento PRINTPDF
-                                    const rawGxState = document.getElementById('GXState')?.value || '{}';
-                                    const gxState = JSON.parse(rawGxState);
-                                    gxState._EventName = "W0099E'PRINTPDF'.$rowIndex";
-                                    gxState._EventGridId = '';
-                                    gxState._EventRowId = '';
+                    // --- MANIPULACIÓN DE FILTROS REALES (MES Y AÑO) ---
+                    println("[*] Seleccionando Mes en el filtro visual: ${empleado.mes}")
+                    page.selectOption("#W0099vMESF", empleado.mes)
+                    page
+                        .locator("#W0099vMESF")
+                        .evaluate("el => el.dispatchEvent(new Event('change'))")
+                    page.waitForTimeout(1500.0)
 
-                                    // 2. Construir el cuerpo del formulario (idéntico al cURL del navegador)
-                                    const params = new URLSearchParams();
-                                    params.append('', '');
-                                    params.append('MPW0005vMB_EPR_CODM', 'AHR');
-                                    params.append('MPW0005vUSUIDM', 'ML17934');
-                                    params.append('MPW0005vPERFILDSCM', 'EMPLEADO');
-                                    params.append('vEMP_NIE', '17934');
-                                    params.append('vNOMBRE', 'LOPEZ SANCHEZ MARCOS');
-                                    params.append('W0099vANIO', '2026');
-                                    params.append('W0099vPLAZANOMINAID', '30O');
-                                    params.append('vMB_EPR_COD', 'AHR');
-                                    params.append('vUSUID', 'ML17934');
-                                    params.append('GXState', JSON.stringify(gxState));
+                    println("[*] Seleccionando Año en el filtro visual: ${empleado.anio}")
+                    page.selectOption("#W0099vANO_PROCF", empleado.anio)
+                    page
+                        .locator("#W0099vANO_PROCF")
+                        .evaluate("el => el.dispatchEvent(new Event('change'))")
+                    page.waitForTimeout(1500.0)
 
-                                    // 3. Construir la URL del POST con gx-no-cache (igual que el navegador)
-                                    const formAction = document.querySelector('form#MAINFORM')?.action || window.location.href;
-                                    const postUrl = formAction + ',gx-no-cache=' + Date.now();
+                    println("[*] Presionando botón 'BUSCAR'...")
+                    page.locator("#W0099BUTTON2").click()
 
-                                    // 4. Recopilar cabeceras de seguridad de GeneXus
-                                    const headers = {
-                                        'Content-Type': 'application/x-www-form-urlencoded',
-                                        'gxajaxrequest': '1',
-                                        'X-Requested-With': 'XMLHttpRequest'
-                                    };
+                    println("[*] Esperando actualización de la lista de recibos en pantalla...")
+                    page.waitForTimeout(5000.0)
 
-                                    // Buscar el token AJAX en variables globales de GeneXus
-                                    const tokenCandidates = ['gx_ajax_sec_token', 'GXSecurityToken', 'gxtoken'];
-                                    for (const c of tokenCandidates) {
-                                        if (window[c]) { headers['ajax_security_token'] = String(window[c]); break; }
+                    // --- BUCLE DE PROCESAMIENTO INDEPENDIENTE ---
+                    for (i in 1..totalFilas) {
+                        val rowIndex = String.format("%04d", i)
+                        println("[*] Procesando recibo de la fila indexada: $rowIndex")
+
+                        val pdfIconSelector =
+                            "#W0099vIMPR_$rowIndex, img[id='W0099vIMPR_$rowIndex']"
+
+                        if (page.locator(pdfIconSelector).isVisible) {
+                            try {
+                                val nombreArchivo =
+                                    "recibo_nomina_Mes_${empleado.mes}_Anio_${empleado.anio}_$rowIndex.pdf"
+                                val rutaDestino = Paths.get(nombreArchivo)
+
+                                // 1. Interceptamos la apertura de la nueva pestaña
+                                val nuevaPestana =
+                                    page.context().waitForPage {
+                                        page.locator(pdfIconSelector).click()
                                     }
 
-                                    // Buscar el auth token JWT de GeneXus
-                                    const authCandidates = ['gx_auth_token', 'GXAuthToken'];
-                                    for (const c of authCandidates) {
-                                        if (window[c]) { headers['x-gxauth-token'] = String(window[c]); break; }
-                                    }
+                                // Espera prudencial para que resuelva la redirección interna del
+                                // IIS
+                                nuevaPestana.waitForLoadState(
+                                    com.microsoft.playwright.options.LoadState.NETWORKIDLE
+                                )
+                                nuevaPestana.waitForTimeout(3000.0)
 
-                                    console.log('POST URL:', postUrl);
-                                    console.log('ajax_security_token:', headers['ajax_security_token'] || 'NO ENCONTRADO');
+                                val urlDocumento = nuevaPestana.url().lowercase()
+                                println(
+                                    "[*] URL detectada en pestaña secundaria: ${nuevaPestana.url()}"
+                                )
 
-                                    // 5. Ejecutar el fetch (las cookies se envían automáticamente - credentials: 'include')
-                                    const response = await fetch(postUrl, {
-                                        method: 'POST',
-                                        headers: headers,
-                                        body: params.toString(),
-                                        credentials: 'include'
-                                    });
-
-                                    const responseText = await response.text();
-                                    return JSON.stringify({
-                                        status: response.status,
-                                        ok: response.ok,
-                                        body: responseText.substring(0, 2000)
-                                    });
-                                } catch(e) {
-                                    return JSON.stringify({ status: 0, ok: false, body: 'ERROR_JS: ' + e.toString() });
+                                // 2. Enrutamiento 100% independiente basado en la URL destino
+                                if (
+                                    urlDocumento.contains("/cargas/") ||
+                                        urlDocumento.contains(".pdf")
+                                ) {
+                                    // CASO 1: Redirige a un archivo físico .pdf (Código funcional
+                                    // original sin contaminar)
+                                    procesarReciboEstatico(nuevaPestana, rutaDestino)
+                                } else {
+                                    // CASO 2: Redirige al script .aspx (Código nuevo calibrado para
+                                    // pantallas anchas/CFDI)
+                                    procesarReciboDinamico(nuevaPestana, rutaDestino)
                                 }
+
+                                // 3. Cierre limpio de la pestaña procesada
+                                nuevaPestana.close()
+                                println("[+] Fila $rowIndex completada con éxito.\n")
+                            } catch (tabException: Exception) {
+                                println(
+                                    "[-] Error al procesar la fila $rowIndex: ${tabException.message}"
+                                )
                             }
-                        """.trimIndent()) as? String ?: "{}"
-
-                        // Parsear la respuesta del fetch
-                        val resultMap = objectMapper.readValue(responseBody, Map::class.java)
-                        val status = resultMap["status"] as? Int ?: 0
-                        val ok = resultMap["ok"] as? Boolean ?: false
-                        val body = resultMap["body"] as? String ?: ""
-
-                        println("[*] Respuesta del servidor: HTTP $status")
-
-                        if (ok) {
-                            extraerYDescargarPdf(body, cookieHeader, rowIndex)
                         } else {
-                            println("[-] Error HTTP $status en fila $rowIndex.")
-                            println("    [Primeros 500 chars]: ${body.take(500)}")
+                            println(
+                                "[-] ADVERTENCIA: El ícono de PDF no está visible para la fila $rowIndex."
+                            )
                         }
 
-                    } catch (e: Exception) {
-                        println("[-] Error general en fila $rowIndex: ${e.message?.take(200)}")
+                        page.waitForTimeout(4000.0)
                     }
-
-                    Thread.sleep(3000)
-                }
-            }
-        }
-    }
-
-    private fun extraerYDescargarPdf(jsonBody: String, cookieHeader: String, rowIndex: String) {
-        val pattern = java.util.regex.Pattern.compile("(?i)\"URL\"\\s*:\\s*\"([^\"]+\\.pdf|[^\"]+blob[^\"]+)\"")
-        val matcher = pattern.matcher(jsonBody)
-
-        if (matcher.find()) {
-            var rawUrl = matcher.group(1).replace("\\/", "/")
-            val downloadUrl = if (rawUrl.startsWith("http")) rawUrl else "$originUrl/$rawUrl"
-            println("[+] URL de descarga localizada: $downloadUrl")
-
-            var pdfBytes: ByteArray? = null
-            var success = false
-
-            for (attempt in 1..5) {
-                try {
-                    println("[*] Intento de descarga $attempt/5...")
-                    Thread.sleep(3000)
-
-                    pdfBytes = webClient.get()
-                        .uri(downloadUrl)
-                        .header("Cookie", cookieHeader)
-                        .retrieve()
-                        .bodyToMono(ByteArray::class.java)
-                        .block()
-
-                    if (pdfBytes != null && pdfBytes.size > 4 &&
-                        pdfBytes[0] == '%'.code.toByte() &&
-                        pdfBytes[1] == 'P'.code.toByte() &&
-                        pdfBytes[2] == 'D'.code.toByte() &&
-                        pdfBytes[3] == 'F'.code.toByte()
-                    ) {
-                        success = true
-                        break
-                    } else {
-                        println("[-] Archivo no listo aún. Reintentando...")
-                    }
+                    println("[+] Proceso de descarga masiva finalizado exitosamente.")
                 } catch (e: Exception) {
-                    println("[-] Error en intento $attempt: ${e.message?.take(100)}")
+                    println("[-] Error crítico durante el flujo automatizado: ${e.message}")
+                    val htmlFallo = page.content()
+                    File("debug_portal_error.html").writeText(htmlFallo)
                 }
             }
-
-            if (success && pdfBytes != null) {
-                val outputFile = File("recibo_nomina_$rowIndex.pdf")
-                outputFile.writeBytes(pdfBytes)
-                println("[!] ¡Éxito! PDF guardado: ${outputFile.absolutePath}")
-            } else {
-                println("[-] Se agotaron los intentos. El servidor no generó el PDF a tiempo.")
-            }
-        } else {
-            println("[-] No se localizó URL de PDF en la respuesta AJAX.")
-            println("    [Primeros 400 chars]: ${jsonBody.take(400)}")
         }
     }
 
-    private fun encode(value: String): String {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8.toString())
+    /**
+     * ESTRATEGIA A: Extracción binaria directa mediante JS Fetch. Diseñado exclusivamente para el
+     * archivo PDF físico estático (Fila 1). Mantiene el archivo original intacto, sin alteraciones
+     * y legible en Adobe Reader.
+     */
+    private fun procesarReciboEstatico(pestana: Page, rutaDestino: java.nio.file.Path) {
+        println("[*] -> Ejecutando Estrategia A: Descarga binaria pura de PDF estático...")
+
+        val rawBytes =
+            pestana.evaluate(
+                """
+            async () => {
+                const response = await fetch(window.location.href);
+                const buffer = await response.arrayBuffer();
+                return Array.from(new Uint8Array(buffer));
+            }
+        """
+            ) as List<*>
+
+        val byteArray = ByteArray(rawBytes.size) { idx -> (rawBytes[idx] as Number).toByte() }
+        Files.write(rutaDestino, byteArray)
+        println("[!] ¡DOCUMENTO ESTÁTICO GUARDADO INTEGRALMENTE!")
+    }
+
+    /**
+     * ESTRATEGIA B — Triple Bypass para ASPX Dinámico (Fila 2).
+     *
+     * Problema raíz: `page.pdf()` de Chromium activa internamente `@media print` SIEMPRE,
+     * ignorando `emulateMedia(SCREEN)`. GeneXus inyecta reglas `@media print` que colapsan
+     * el layout de dos columnas (Percepciones | Deducciones + Puesto).
+     *
+     * Solución en tres capas quirúrgicas antes de llamar a page.pdf():
+     *
+     *   Capa 1 — PURGA DE CSSOM: Itera todos los CSSStyleSheet del documento y elimina
+     *             físicamente cada CSSMediaRule cuya condición contenga "print". Esto
+     *             anula en memoria las hojas compiladas por GeneXus sin tocar el DOM.
+     *
+     *   Capa 2 — INYECCIÓN DE OVERRIDE: Inserta un <style> con `@media print` propio
+     *             al final del <head>, con mayor especificidad (selectores !important)
+     *             que fuerza el layout de pantalla: floats, widths, display, overflow.
+     *
+     *   Capa 3 — PDF LANDSCAPE A4: Renderiza en orientación horizontal para disponer
+     *             de ≈1123px de ancho útil; sin escala < 1 para no comprimir tipografía.
+     */
+    private fun procesarReciboDinamico(pestana: Page, rutaDestino: java.nio.file.Path) {
+        println("[*] -> Ejecutando Estrategia B (Triple Bypass) para vista ASPX dinámica...")
+
+        // Viewport ancho para que los elementos responsivos se expandan al máximo antes del PDF
+        pestana.setViewportSize(1920, 1080)
+        pestana.waitForTimeout(1500.0)
+
+        // ── CAPA 1: Purga quirúrgica de @media print del CSSOM de GeneXus ──────────────────────
+        println("[*]    Capa 1: Purgando reglas @media print del CSSOM...")
+        pestana.evaluate(
+            """
+            () => {
+                let removedCount = 0;
+                for (const sheet of Array.from(document.styleSheets)) {
+                    try {
+                        const rules = Array.from(sheet.cssRules || []);
+                        // Recorremos en reversa para no alterar índices al borrar
+                        for (let i = rules.length - 1; i >= 0; i--) {
+                            const rule = rules[i];
+                            // CSSMediaRule tiene type === 4
+                            if (rule.type === CSSRule.MEDIA_RULE) {
+                                const mediaText = rule.media?.mediaText || '';
+                                if (mediaText.includes('print')) {
+                                    sheet.deleteRule(i);
+                                    removedCount++;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Hojas cross-origin lanzan SecurityError, las ignoramos
+                    }
+                }
+                console.log('[Capa1] Reglas @media print eliminadas del CSSOM: ' + removedCount);
+            }
+            """.trimIndent()
+        )
+
+        // ── CAPA 2: Inyección de hoja de estilos override de alta especificidad ────────────────
+        println("[*]    Capa 2: Inyectando CSS override de layout de pantalla...")
+        pestana.evaluate(
+            """
+            () => {
+                const css = `
+                    /* ── Override GeneXus @media print — generado por scraper Kotlin ── */
+                    @media print {
+
+                        /* Eliminar saltos de página automáticos entre columnas */
+                        * {
+                            page-break-inside: avoid !important;
+                            break-inside: avoid !important;
+                        }
+
+                        /* Tamaño de página personalizado: landscape A4 (297mm x 210mm) */
+                        @page {
+                            size: A4 landscape;
+                            margin: 8mm 10mm 8mm 10mm;
+                        }
+
+                        /* Ancho del body y contenedor raíz al 100% del papel */
+                        html, body {
+                            width: 100% !important;
+                            max-width: 100% !important;
+                            overflow: visible !important;
+                            margin: 0 !important;
+                            padding: 0 !important;
+                        }
+
+                        /* Preservar floats y anchos de columnas laterales */
+                        table, tr, td, th {
+                            display: revert !important;
+                            width: auto !important;
+                            max-width: none !important;
+                            overflow: visible !important;
+                            white-space: normal !important;
+                        }
+
+                        /* Columnas flotantes: mantener el layout side-by-side */
+                        td[width], th[width],
+                        [style*="float: left"], [style*="float:left"],
+                        [style*="float: right"], [style*="float:right"] {
+                            float: revert !important;
+                            width: revert !important;
+                            max-width: none !important;
+                            overflow: visible !important;
+                        }
+
+                        /* Tablas principales: expandir al 100% del contenedor */
+                        table[width="100%"], table[style*="width:100%"],
+                        table[style*="width: 100%"] {
+                            width: 100% !important;
+                            table-layout: auto !important;
+                        }
+
+                        /* Suprimir elementos de UI que no pertenecen al recibo */
+                        button, input[type="button"], input[type="submit"],
+                        .no-print, #btnImprimir {
+                            display: none !important;
+                        }
+                    }
+                `;
+                const styleEl = document.createElement('style');
+                styleEl.setAttribute('id', 'scraper-print-override');
+                styleEl.setAttribute('media', 'all');
+                styleEl.textContent = css;
+                document.head.appendChild(styleEl);
+                console.log('[Capa2] Hoja override inyectada correctamente.');
+            }
+            """.trimIndent()
+        )
+
+        // Pausa para que Blink re-calcule el árbol de renderizado con los estilos actualizados
+        pestana.waitForTimeout(1500.0)
+
+        // ── CAPA 3: Exportación PDF en A4 Landscape sin compresión de escala ─────────────────
+        println("[*]    Capa 3: Generando PDF en A4 Landscape sin compresión de escala...")
+        pestana.pdf(
+            Page.PdfOptions()
+                .setPath(rutaDestino)
+                .setFormat("A4")
+                .setLandscape(true)       // 297mm × 210mm → ≈1123px útiles a 96dpi
+                .setScale(1.0)            // Sin compresión: tipografía y celdas en tamaño real
+                .setDisplayHeaderFooter(false)
+                .setPrintBackground(true)
+                .setMargin(
+                    com.microsoft.playwright.options.Margin()
+                        .setTop("8mm")
+                        .setBottom("8mm")
+                        .setLeft("10mm")
+                        .setRight("10mm")
+                )
+        )
+        println("[!] ¡RECIBO DINÁMICO GENERADO — COLUMNAS ALINEADAS, SIN CORTES LATERALES!")
     }
 }

@@ -9,24 +9,40 @@ import org.springframework.boot.runApplication
 import org.springframework.context.annotation.Bean
 
 @SpringBootApplication
-class SiteApplication(
-    private val payrollService: GeneXusPayrollService
-) : CommandLineRunner {
+class SiteApplication(private val payrollService: GeneXusPayrollService) : CommandLineRunner {
 
-    // CORRECCIÓN: Definimos el Bean de ObjectMapper para que Spring lo pueda inyectar en tu servicio
     @Bean
     fun objectMapper(): ObjectMapper {
         return jacksonObjectMapper()
     }
 
     override fun run(vararg args: String) {
-        val sessionCookie = System.getenv("HUMANSITE_SESSION_COOKIE")
-            ?: "GX_CLIENT_ID=d50eb382-0032-432d-ba38-bc54865951b5; GX_SESSION_ID=lhXevmO48STNRujp56B6Xk%2f%2fb9CFKwKJbddhsRucQu8%3d; ASP.NET_SessionId=fabs3edwo4raztaok0oacxoq"
+        println("[*] Cargando datos de MARCOS LOPEZ SANCHEZ para el login y payload AJAX...")
 
-        println("[*] Iniciando proceso automatizado por lotes...")
+        // Credenciales y datos del empleado objetivo
+        val usuarioTarget = "ML17934"
+        val contrasenaTarget = "Humansite531"
 
-        // Ejecutamos la automatización para las primeras 5 filas detectadas en tu Grid3
-        payrollService.ejecutarDescargaMasiva(sessionCookie, totalFilas = 5)
+        // Incorporación de tus datos extraídos del GXState / Payload
+        val empleadoTarget =
+            GeneXusPayrollService.EmpleadoInfo(
+                idUsuario = usuarioTarget, // MPW0005vUSUIDM / vUSUID
+                nie = "17934", // vEMP_NIE / W0101vUSUEMPNIE
+                nombre = "LOPEZ SANCHEZ MARCOS", // vNOMBRE
+                plazaId = "30O", // W0099vPLAZANOMINAID (O de Ojo, no cero)
+                anio = "2026", // W0099vANIO
+            )
+
+        println("[*] Iniciando proceso automatizado por lotes con Login Orgánico...")
+
+        // Nota: Tu análisis muestra "W0099nRC_GXsfl_22 : 2", lo que significa que tienes
+        // 2 recibos cargados en la página actual. Procesaremos esos 2 de golpe.
+        // CORRECCIÓN: Ahora se envían los parámetros correspondientes a la nueva firma del método
+        payrollService.ejecutarDescargaMasiva(
+            totalFilas = 2,
+            empleado = empleadoTarget,
+            contrasenaUsuario = contrasenaTarget,
+        )
     }
 }
 
