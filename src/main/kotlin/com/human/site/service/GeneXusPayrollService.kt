@@ -6,10 +6,8 @@ import com.microsoft.playwright.BrowserContext
 import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
-import com.microsoft.playwright.Response
 import java.nio.file.Files
 import java.nio.file.Paths
-import java.util.function.Consumer
 import org.springframework.stereotype.Service
 
 @Service
@@ -38,8 +36,8 @@ class GeneXusPayrollService {
                         listOf(
                             "--disable-blink-features=AutomationControlled",
                             "--start-maximized",
-                            "--disable-print-preview", // [!] BLOQUEO MAESTRO: Anula cualquier
-                                                      // diálogo de impresión nativo
+                            "--disable-print-preview", // Bloqueamos la ventana de impresión desde el
+                            // inicio
                         )
                     )
 
@@ -57,13 +55,6 @@ class GeneXusPayrollService {
                 context.addInitScript(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
                 )
-
-                // Anula la ventana emergente de impresión nativa en pestañas secundarias
-                context.onPage { nuevaPagina ->
-                    nuevaPagina.addInitScript(
-                        "() => { window.print = () => { console.log('Ventana de impresión anulada.'); }; }"
-                    )
-                }
 
                 val page = context.newPage()
                 val loginUrl = "$originUrl/hlogin.aspx"
@@ -108,7 +99,7 @@ class GeneXusPayrollService {
                     page.locator("#W0099BUTTON2").click()
                     page.waitForTimeout(5000.0)
 
-                    // --- BUCLE DE PROCESAMIENTO SEGURO ---
+                    // --- BUCLE DE PROCESAMIENTO UNIFICADO (CORREGIDO Y BLINDADO) ---
                     for (i in 1..totalFilas) {
                         val rowIndex = String.format("%04d", i)
                         val pdfIconSelector =
@@ -120,118 +111,74 @@ class GeneXusPayrollService {
                                     "recibo_nomina_Mes_${empleado.mes}_Anio_${empleado.anio}_$rowIndex.pdf"
                                 val rutaDestino = Paths.get(nombreArchivo)
 
-                                if (i == 1) {
-                                    // ----------------------------------------------------------------
-                                    // FILA 1: TU CÓDIGO ORIGINAL (INTACTO, FUNCIONA AL 100%)
-                                    // ----------------------------------------------------------------
-                                    println(
-                                        "[*] Fila 1 detectada. Ejecutando Estrategia A (Descarga Estática original)..."
-                                    )
-                                    val nuevaPestana =
-                                        page.context().waitForPage {
-                                            page.locator(pdfIconSelector).click()
-                                        }
-                                    nuevaPestana.waitForLoadState(
-                                        com.microsoft.playwright.options.LoadState.NETWORKIDLE
-                                    )
+                                println(
+                                    "[*] Fila $rowIndex detectada. Ejecutando extracción inteligente..."
+                                )
 
-                                    val rawBytes =
-                                        nuevaPestana.evaluate(
-                                            """
-                                        async () => {
-                                            const response = await fetch(window.location.href);
-                                            const buffer = await response.arrayBuffer();
-                                            return Array.from(new Uint8Array(buffer));
-                                        }
-                                    """
-                                        ) as List<*>
+                                // 1. Hacemos clic y esperamos la apertura de la nueva pestaña
+                                val nuevaPestana =
+                                    page.context().waitForPage(
+                                        BrowserContext.WaitForPageOptions().setTimeout(60000.0)
+                                    ) {
+                                        page.locator(pdfIconSelector).click()
+                                    }
 
-                                    val byteArray =
-                                        ByteArray(rawBytes.size) { idx ->
-                                            (rawBytes[idx] as Number).toByte()
-                                        }
-                                    Files.write(rutaDestino, byteArray)
-                                    println(
-                                        "[!] ¡DOCUMENTO ESTÁTICO DE FILA 1 GUARDADO INTEGRALMENTE!"
-                                    )
-                                    nuevaPestana.close()
-                                } else {
-                                    // ----------------------------------------------------------------
-                                    // FILA 2: EL BLOQUE COMPLEJO (LISTENER DE RED PASIVO)
-                                    // ----------------------------------------------------------------
-                                    println(
-                                        "[*] Fila $rowIndex (Bloque Complejo) detectada. Interceptando respuesta de red en segundo plano..."
-                                    )
+                                // 2. Esperamos a que la pestaña asiente su carga básica
+                                nuevaPestana.waitForLoadState(
+                                    com.microsoft.playwright.options.LoadState.LOAD
+                                )
+                                page.waitForTimeout(
+                                    2500.0
+                                ) // Tiempo de colchón para carga de scripts de GeneXus
 
-                                    var pdfBytes: ByteArray? = null
-
-                                    // Creamos un espía (listener) para revisar todo el tráfico que
-                                    // baje el navegador
-                                    val responseHandler =
-                                        Consumer<Response> { response ->
-                                            val url = response.url().lowercase()
-                                            if (
-                                                url.contains("mostrarformatopdf.aspx") ||
-                                                    url.contains(".pdf")
-                                            ) {
-                                                try {
-                                                    val body = response.body()
-                                                    if (body != null && body.isNotEmpty()) {
-                                                        pdfBytes =
-                                                            body // Guardamos los bytes atrapados
-                                                    }
-                                                } catch (ignore: Exception) {
-                                                    // Ignoramos errores de preflight o streams
-                                                    // parciales
+                                // 3. ESTRATEGIA INTELIGENTE AUTOMÁTICA (Sintaxis JS Pura .includes)
+                                val rawBytes =
+                                    nuevaPestana.evaluate(
+                                        """
+                                    async () => {
+                                        let urlObjetivo = window.location.href;
+                                        
+                                        // Validamos usando sintaxis JavaScript nativa (.includes)
+                                        if (urlObjetivo.toLowerCase().includes("mostrarformatopdf") || document.getElementById("PDFtoPrint")) {
+                                            const iframe = document.getElementById("PDFtoPrint");
+                                            if (iframe && iframe.src) {
+                                                // Extraemos la URL y le removemos el '#toolbar=0' para obtener el PDF limpio
+                                                urlObjetivo = iframe.src.split('#')[0];
+                                            } else {
+                                                const spanLink = document.getElementById("span_vLIGAPDF");
+                                                if (spanLink && spanLink.innerText) {
+                                                    urlObjetivo = spanLink.innerText.trim();
                                                 }
                                             }
                                         }
-
-                                    // Activamos el espía antes de hacer clic
-                                    page.context().onResponse(responseHandler)
-
-                                    var nuevaPestana: Page? = null
-                                    try {
-                                        // Hacemos el clic y esperamos a que cargue la pestaña
-                                        nuevaPestana =
-                                            page.context().waitForPage(
-                                                BrowserContext.WaitForPageOptions()
-                                                    .setTimeout(45000.0)
-                                            ) {
-                                                page.locator(pdfIconSelector).click()
-                                            }
-                                        nuevaPestana.waitForLoadState(
-                                            com.microsoft.playwright.options.LoadState.NETWORKIDLE
-                                        )
-                                        nuevaPestana.waitForTimeout(
-                                            3000.0
-                                        ) // Tiempo de cortesía para que termine de bajar los bytes
-                                    } catch (e: Exception) {
-                                        println(
-                                            "[-] Nota: Se agotó el tiempo esperando la pestaña, revisaremos si se capturó la respuesta de red."
-                                        )
-                                    } finally {
-                                        // Desactivamos el espía (MUY IMPORTANTE)
-                                        page.context().offResponse(responseHandler)
-
-                                        // Revisamos si nuestro espía logró atrapar el PDF
-                                        if (pdfBytes != null) {
-                                            Files.write(rutaDestino, pdfBytes!!)
-                                            println(
-                                                "[!] ¡RECIBO DINÁMICO DE FILA $rowIndex EXTRAÍDO DESDE RED CON ÉXITO! (Calidad perfecta)"
-                                            )
-                                        } else {
-                                            println(
-                                                "[-] No se pudo interceptar el flujo binario desde la red."
-                                            )
-                                        }
-
-                                        // Cerramos la pestaña
-                                        try {
-                                            nuevaPestana?.close()
-                                        } catch (ignore: Exception) {}
+                                        
+                                        // Hacemos el fetch al binario real del PDF directamente desde el navegador
+                                        const response = await fetch(urlObjetivo);
+                                        const buffer = await response.arrayBuffer();
+                                        return Array.from(new Uint8Array(buffer));
                                     }
+                                """
+                                    ) as List<*>
+
+                                // 4. Conversión y escritura a disco
+                                val byteArray =
+                                    ByteArray(rawBytes.size) { idx ->
+                                        (rawBytes[idx] as Number).toByte()
+                                    }
+
+                                if (byteArray.isNotEmpty()) {
+                                    Files.write(rutaDestino, byteArray)
+                                    println(
+                                        "[!] ¡RECIBO DE LA FILA $rowIndex EXTRAÍDO CORRECTAMENTE! -> ${rutaDestino.fileName}"
+                                    )
+                                } else {
+                                    throw Exception("El flujo binario regresó vacío.")
                                 }
+
+                                // 5. Cerramos la pestaña activa limpiamente
+                                try {
+                                    nuevaPestana.close()
+                                } catch (_: Exception) {}
                                 println("[+] Fila $rowIndex completada con éxito.\n")
                             } catch (tabException: Exception) {
                                 println(
@@ -245,6 +192,7 @@ class GeneXusPayrollService {
                         }
                         page.waitForTimeout(2000.0)
                     }
+
                     println("[+] Proceso de descarga masiva finalizado exitosamente.")
                 } catch (e: Exception) {
                     println("[-] Error crítico durante el flujo automatizado: ${e.message}")
