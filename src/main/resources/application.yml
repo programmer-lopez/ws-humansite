@@ -1,13 +1,13 @@
 server:
-  port: 5002
+  port: 5000
 spring:
   application:
     name: site
 
 humansite:
   credentials:
-    username: ML17934
-    password: 5314Humansite
+    username: 
+    password: 
   base-url: "https://ahr.humansite.com.mx"
   download-dir: "pdf"
 
