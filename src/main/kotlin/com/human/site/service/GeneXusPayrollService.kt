@@ -25,7 +25,7 @@ class GeneXusPayrollService {
         val mes: String = "5",
     )
 
-    fun ejecutarDescargaMasiva(totalFilas: Int, empleado: EmpleadoInfo, contrasenaUsuario: String) {
+    fun ejecutarDescargaMasiva(empleado: EmpleadoInfo, contrasenaUsuario: String) {
         println("[*] Iniciando proceso automatizado por lotes con Interacción Visual...")
 
         Playwright.create().use { playwright ->
@@ -53,7 +53,7 @@ class GeneXusPayrollService {
 
                 val context = br.newContext(contextOptions)
                 context.addInitScript(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); window.print = function(){};"
                 )
 
                 val page = context.newPage()
@@ -82,34 +82,41 @@ class GeneXusPayrollService {
                     )
                     println("[+] ¡Autenticación completada y panel de control visible!")
 
-                    // --- MANIPULACIÓN DE FILTROS ---
-                    page.selectOption("#W0099vMESF", empleado.mes)
-                    page
-                        .locator("#W0099vMESF")
-                        .evaluate("el => el.dispatchEvent(new Event('change'))")
-                    page.waitForTimeout(1500.0)
+                    // OBTENER TODAS LAS FECHAS DE PAGO
+                    val fechasPago = page.locator("#W0099vCPFECPAGF option").all().map { it.getAttribute("value") }.filter { it != null && it.trim().isNotEmpty() && it.contains("/") }
 
-                    page.selectOption("#W0099vANO_PROCF", empleado.anio)
-                    page
-                        .locator("#W0099vANO_PROCF")
-                        .evaluate("el => el.dispatchEvent(new Event('change'))")
-                    page.waitForTimeout(1500.0)
+                    println("[*] Fechas de pago encontradas: $fechasPago")
 
-                    println("[*] Presionando botón 'BUSCAR'...")
-                    page.locator("#W0099BUTTON2").click()
-                    page.waitForTimeout(5000.0)
+                    // Crear carpeta pdf si no existe
+                    val pdfDir = Paths.get("pdf")
+                    if (!Files.exists(pdfDir)) {
+                        Files.createDirectories(pdfDir)
+                    }
 
-                    // --- BUCLE DE PROCESAMIENTO UNIFICADO (CORREGIDO Y BLINDADO) ---
-                    for (i in 1..totalFilas) {
-                        val rowIndex = String.format("%04d", i)
+                    for (fechaVal in fechasPago) {
+                        println("[*] Consultando Fecha de pago: $fechaVal...")
+                        
+                        page.selectOption("#W0099vCPFECPAGF", fechaVal)
+                        page.locator("#W0099vCPFECPAGF").evaluate("el => el.dispatchEvent(new Event('change'))")
+                        page.waitForTimeout(1000.0)
+
+                        page.locator("#W0099BUTTON2").click()
+                        page.waitForTimeout(3000.0)
+
+                        // --- BUCLE DE PROCESAMIENTO DINÁMICO ---
+                        val totalFilas = page.locator("img[id^='W0099vIMPR_']").count()
+                        println("[*] Se encontraron $totalFilas recibos para la fecha $fechaVal")
+
+                        for (i in 1..totalFilas) {
+                            val rowIndex = String.format("%04d", i)
                         val pdfIconSelector =
                             "#W0099vIMPR_$rowIndex, img[id='W0099vIMPR_$rowIndex']"
 
                         if (page.locator(pdfIconSelector).isVisible) {
                             try {
-                                val nombreArchivo =
-                                    "recibo_nomina_Mes_${empleado.mes}_Anio_${empleado.anio}_$rowIndex.pdf"
-                                val rutaDestino = Paths.get(nombreArchivo)
+                                val fechaLimpia = fechaVal.replace("/", "_")
+                                val nombreArchivo = "recibo_nomina_Fecha_${fechaLimpia}_$rowIndex.pdf"
+                                val rutaDestino = pdfDir.resolve(nombreArchivo)
 
                                 println(
                                     "[*] Fila $rowIndex detectada. Ejecutando extracción inteligente..."
@@ -190,8 +197,9 @@ class GeneXusPayrollService {
                                 "[-] ADVERTENCIA: El ícono de PDF no está visible para la fila $rowIndex."
                             )
                         }
-                        page.waitForTimeout(2000.0)
+                        page.waitForTimeout(1000.0)
                     }
+                }
 
                     println("[+] Proceso de descarga masiva finalizado exitosamente.")
                 } catch (e: Exception) {

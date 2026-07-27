@@ -21,7 +21,7 @@ class SiteApplication(private val payrollService: GeneXusPayrollService) : Comma
 
         // Credenciales y datos del empleado objetivo
         val usuarioTarget = "ML17934"
-        val contrasenaTarget = "Humansite531"
+        val contrasenaTarget = "5314Humansite"
 
         // Incorporación de tus datos extraídos del GXState / Payload
         val empleadoTarget =
@@ -37,9 +37,7 @@ class SiteApplication(private val payrollService: GeneXusPayrollService) : Comma
 
         // Nota: Tu análisis muestra "W0099nRC_GXsfl_22 : 2", lo que significa que tienes
         // 2 recibos cargados en la página actual. Procesaremos esos 2 de golpe.
-        // CORRECCIÓN: Ahora se envían los parámetros correspondientes a la nueva firma del método
         payrollService.ejecutarDescargaMasiva(
-            totalFilas = 2,
             empleado = empleadoTarget,
             contrasenaUsuario = contrasenaTarget,
         )
